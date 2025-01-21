@@ -185,6 +185,7 @@ void loop() {
         gridY >= 0 && gridY < CANVAS_SIZE) {
       // Draw with the 3x3 square brush using current mode
       draw(gridX, gridY, drawMode);
+      drawModeButton();
       
       // Add a small delay to avoid overwhelming the classification task
       delay(10);
@@ -197,7 +198,9 @@ void loop() {
     if (wasPressed) {
       // If we just finished a stroke, ensure we get a final classification
       if (!buttonWasPressed) {
-        delay(50);  // Wait a bit for any in-progress classification
+        while (classificationData.processing) {
+          delay(10);
+        }  // Wait a bit for any in-progress classification
         classifyCanvas();  // Trigger final classification
       }
     }
