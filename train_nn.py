@@ -14,12 +14,29 @@ class BinarizeTransform(object):
     A custom transform that thresholds the input (already converted to tensor)
     at a specified value, converting it to 0 or 1.
     """
-    def __init__(self, threshold=0.5):
+    def __init__(self, threshold=0.2):
         self.threshold = threshold
 
     def __call__(self, img_tensor):
         # img_tensor is assumed to be in [0,1], shape [1, 28, 28]
         return (img_tensor > self.threshold).float()
+
+# ---------------------
+# Random Binarize Transform
+# ---------------------
+class RandomBinarizeTransform(object):
+    """
+    A custom transform that thresholds the input at a random value within
+    a specified range, converting it to 0 or 1.
+    """
+    def __init__(self, min_threshold=0.1, max_threshold=0.3):
+        self.min_threshold = min_threshold
+        self.max_threshold = max_threshold
+
+    def __call__(self, img_tensor):
+        # Randomly choose threshold for this call
+        threshold = self.min_threshold + torch.rand(1).item() * (self.max_threshold - self.min_threshold)
+        return (img_tensor > threshold).float()
 
 # ---------------------
 # Model (Same as Before)
@@ -52,25 +69,14 @@ class SmallNet(nn.Module):
 # ---------------------
 # Create Datasets
 # ---------------------
-train_dataset = datasets.MNIST(
-    root='./data',
-    train=True,
-    download=True,
-    transform=transforms.Compose([
-        transforms.ToTensor(),
-        BinarizeTransform(threshold=0.5)
-    ])
-)
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    RandomBinarizeTransform(min_threshold=0.1, max_threshold=0.4),
+    transforms.RandomRotation(15)
+])
 
-test_dataset = datasets.MNIST(
-    root='./data',
-    train=False,
-    download=True,
-    transform=transforms.Compose([
-        transforms.ToTensor(),
-        BinarizeTransform(threshold=0.5)
-    ])
-)
+train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+test_dataset = datasets.MNIST('./data', train=False, transform=transform)
 
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
@@ -83,7 +89,7 @@ optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
 
 # Train
 model.train()
-num_epochs = 2  # shorter for demo
+num_epochs = 10
 for epoch in range(num_epochs):
     for batch_idx, (data, target) in enumerate(train_loader):
         optimizer.zero_grad()
