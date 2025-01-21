@@ -27,15 +27,6 @@ TFT_eSPI tft = TFT_eSPI();
 // 2D array storing the user’s drawing (black/white)
 bool canvas[CANVAS_SIZE][CANVAS_SIZE];
 
-//--------------------------------------------
-// CLASSIFY BUTTON PARAMETERS
-//--------------------------------------------
-#define BTN_X      80
-#define BTN_Y      320
-#define BTN_W      160
-#define BTN_H      40
-#define BTN_TEXT   "CLASSIFY"
-
 bool wasPressed = false; // Track last touch state
 
 //--------------------------------------------
@@ -43,9 +34,21 @@ bool wasPressed = false; // Track last touch state
 //--------------------------------------------
 void touch_calibrate();
 void drawCanvas();
-void drawBlock(int x, int y, bool colorValue);
 void setPixel(int x, int y, bool color);
-void classifyCanvas();  // Our new function
+void classifyCanvas();
+
+// Global mutex for TFT access
+SemaphoreHandle_t tftMutex = NULL;
+
+// Classification task handle
+TaskHandle_t classifyTaskHandle = NULL;
+
+// Struct for passing data between cores
+struct ClassificationRequest {
+  float image[CANVAS_SIZE * CANVAS_SIZE];
+  volatile bool pending;
+  volatile bool processing;
+} classificationData;
 
 //--------------------------------------------
 // SETUP
@@ -56,45 +59,66 @@ void setup() {
     delay(10);
   }
 
-  tft.init();
-  tft.setRotation(2); // Adjust as needed for your display orientation
+  // Create mutex for TFT access before initializing TFT
+  tftMutex = xSemaphoreCreateMutex();
+  
+  if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+    tft.init();
+    tft.setRotation(2);
 
 #ifdef TFT_BL
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);
 #endif
 
-  // Touch calibration
-  touch_calibrate();
+    // Touch calibration
+    touch_calibrate();
 
-  // Clear screen
-  tft.fillScreen(TFT_BLACK);
+    // Clear screen to black
+    tft.fillScreen(TFT_BLACK);
 
-  // Initialize the canvas to all white (false = white, true = black)
-  for (int y = 0; y < CANVAS_SIZE; y++) {
-    for (int x = 0; x < CANVAS_SIZE; x++) {
-      canvas[x][y] = false; // White
-    }
+    // Draw a frame around the canvas
+    tft.drawRect(
+      CANVAS_MARGIN - 1, 
+      CANVAS_MARGIN - 1, 
+      (CANVAS_SIZE * BLOCK_SIZE) + 2, 
+      (CANVAS_SIZE * BLOCK_SIZE) + 2, 
+      TFT_WHITE
+    );
+
+    // Fill canvas area with black
+    tft.fillRect(
+      CANVAS_MARGIN,
+      CANVAS_MARGIN,
+      CANVAS_SIZE * BLOCK_SIZE,
+      CANVAS_SIZE * BLOCK_SIZE,
+      TFT_BLACK
+    );
+    
+    xSemaphoreGive(tftMutex);
   }
 
-  // Draw a frame around the canvas
-  tft.drawRect(
-    CANVAS_MARGIN - 1, 
-    CANVAS_MARGIN - 1, 
-    (CANVAS_SIZE * BLOCK_SIZE) + 2, 
-    (CANVAS_SIZE * BLOCK_SIZE) + 2, 
-    TFT_WHITE
+  // Initialize the canvas to all black (true = white, false = black)
+  for (int y = 0; y < CANVAS_SIZE; y++) {
+    for (int x = 0; x < CANVAS_SIZE; x++) {
+      canvas[x][y] = false; // Black
+    }
+  }
+  
+  // Clear classification flags
+  classificationData.pending = false;
+  classificationData.processing = false;
+  
+  // Create classification task on core 1
+  xTaskCreatePinnedToCore(
+    classifyTask,        // Function to implement the task
+    "classifyTask",      // Name of the task
+    8192,               // Stack size in words
+    NULL,               // Task input parameter
+    1,                  // Priority of the task
+    &classifyTaskHandle, // Task handle
+    1                   // Core where the task should run
   );
-
-  // Draw the initial (all-white) canvas
-  drawCanvas();
-
-  // Draw the "Classify" button
-  tft.drawRect(BTN_X, BTN_Y, BTN_W, BTN_H, TFT_WHITE);
-  tft.setCursor(BTN_X + 10, BTN_Y + 10);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setTextSize(2);
-  tft.print(BTN_TEXT);
 }
 
 //--------------------------------------------
@@ -102,43 +126,35 @@ void setup() {
 //--------------------------------------------
 void loop() {
   uint16_t t_x = 0, t_y = 0;
-  bool pressed = tft.getTouch(&t_x, &t_y);
+  bool pressed = false;
+  
+  if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+    pressed = tft.getTouch(&t_x, &t_y);
+    xSemaphoreGive(tftMutex);
+  }
 
   if (pressed) {
     // If we just transitioned from not-pressed -> pressed
     if (!wasPressed) {
       wasPressed = true;  // Touch is now active
-
-      // Check if user tapped the "Classify" button region
-      if (t_x >= BTN_X && t_x < (BTN_X + BTN_W) &&
-          t_y >= BTN_Y && t_y < (BTN_Y + BTN_H)) {
-        // Classify the drawn image
-        classifyCanvas();
-      }
-      else {
-        // Otherwise, check if tapped within the 28×28 drawing canvas
-        int gridX = (t_x - CANVAS_MARGIN) / BLOCK_SIZE;
-        int gridY = (t_y - CANVAS_MARGIN) / BLOCK_SIZE;
-        if (gridX >= 0 && gridX < CANVAS_SIZE &&
-            gridY >= 0 && gridY < CANVAS_SIZE) {
-          // Paint black
-          draw(gridX, gridY, true);
-        }
-      }
     }
-    else {
-      // (User might be dragging or continuing to press)
-      // For real "drawing," you might keep painting black as user drags:
-      int gridX = (t_x - CANVAS_MARGIN) / BLOCK_SIZE;
-      int gridY = (t_y - CANVAS_MARGIN) / BLOCK_SIZE;
-      if (gridX >= 0 && gridX < CANVAS_SIZE &&
-          gridY >= 0 && gridY < CANVAS_SIZE) {
-        draw(gridX, gridY, true);
-      }
+    
+    // Check if tapped within the 28×28 drawing canvas
+    int gridX = (t_x - CANVAS_MARGIN) / BLOCK_SIZE;
+    int gridY = (t_y - CANVAS_MARGIN) / BLOCK_SIZE;
+    if (gridX >= 0 && gridX < CANVAS_SIZE &&
+        gridY >= 0 && gridY < CANVAS_SIZE) {
+      // Draw with the 3x3 square brush
+      draw(gridX, gridY, true);
+      
+      // Add a small delay to avoid overwhelming the classification task
+      delay(10);
+      
+      // Trigger classification after drawing
+      classifyCanvas();
     }
   }
   else {
-    // No press detected
     wasPressed = false;
   }
 }
@@ -148,112 +164,157 @@ void loop() {
  ******************************************************************************/
 
 void drawCanvas() {
-  for (int y = 0; y < CANVAS_SIZE; y++) {
-    for (int x = 0; x < CANVAS_SIZE; x++) {
-      drawBlock(x, y, canvas[x][y]);
+  // Take mutex once for the entire canvas drawing operation
+  if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+    for (int y = 0; y < CANVAS_SIZE; y++) {
+      for (int x = 0; x < CANVAS_SIZE; x++) {
+        tft.fillRect(
+          CANVAS_MARGIN + (x * BLOCK_SIZE),
+          CANVAS_MARGIN + (y * BLOCK_SIZE),
+          BLOCK_SIZE,
+          BLOCK_SIZE,
+          canvas[x][y] ? TFT_WHITE : TFT_BLACK
+        );
+      }
     }
+    xSemaphoreGive(tftMutex);
   }
 }
 
-// colorValue = true => black pixel, false => white pixel
-void drawBlock(int x, int y, bool colorValue) {
-  uint16_t color = colorValue ? TFT_WHITE : TFT_BLACK;
-  int16_t screenX = (x * BLOCK_SIZE) + CANVAS_MARGIN;
-  int16_t screenY = (y * BLOCK_SIZE) + CANVAS_MARGIN;
-  tft.fillRect(screenX, screenY, BLOCK_SIZE, BLOCK_SIZE, color);
-}
-
 void setPixel(int x, int y, bool color) {
-  if (x < 0 || x >= CANVAS_SIZE || y < 0 || y >= CANVAS_SIZE) return;
-  canvas[x][y] = color;
-  drawBlock(x, y, color);
+  if (x >= 0 && x < CANVAS_SIZE && y >= 0 && y < CANVAS_SIZE) {
+    canvas[x][y] = color;
+  }
 }
 
 void setBrushPlus(int cx, int cy, bool color) {
-  // Center
+  // Center pixel
   setPixel(cx, cy, color);
-
-  // Up
-  if (cy - 1 >= 0)
-    setPixel(cx, cy - 1, color);
-
-  // Down
-  if (cy + 1 < CANVAS_SIZE)
-    setPixel(cx, cy + 1, color);
-
+  
+  // Top
+  setPixel(cx, cy-1, color);
+  // Bottom
+  setPixel(cx, cy+1, color);
   // Left
-  if (cx - 1 >= 0)
-    setPixel(cx - 1, cy, color);
-
+  setPixel(cx-1, cy, color);
   // Right
-  if (cx + 1 < CANVAS_SIZE)
-    setPixel(cx + 1, cy, color);
+  setPixel(cx+1, cy, color);
 }
 
 void setBrushSquare(int cx, int cy, bool color) {
-  for(int dy = -1; dy <= 1; dy++) {
-    for(int dx = -1; dx <= 1; dx++) {
-      if(cx + dx >= 0 && cx + dx < CANVAS_SIZE && 
-         cy + dy >= 0 && cy + dy < CANVAS_SIZE) {
-        setPixel(cx + dx, cy + dy, color);
-      }
+  for (int y = cy - 1; y <= cy + 1; y++) {
+    for (int x = cx - 1; x <= cx + 1; x++) {
+      setPixel(x, y, color);
     }
   }
 }
 
 void draw(int cx, int cy, bool color) {
-  // setPixel(cx, cy, color);
-  // setBrushPlus(cx, cy, color);
   setBrushSquare(cx, cy, color);
+  
+  // Take mutex once for all drawing operations
+  if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+    // Draw the 3x3 block
+    for (int y = cy - 1; y <= cy + 1; y++) {
+      if (y >= 0 && y < CANVAS_SIZE) {
+        for (int x = cx - 1; x <= cx + 1; x++) {
+          if (x >= 0 && x < CANVAS_SIZE) {
+            tft.fillRect(
+              CANVAS_MARGIN + (x * BLOCK_SIZE),
+              CANVAS_MARGIN + (y * BLOCK_SIZE),
+              BLOCK_SIZE,
+              BLOCK_SIZE,
+              color ? TFT_WHITE : TFT_BLACK
+            );
+          }
+        }
+      }
+    }
+    xSemaphoreGive(tftMutex);
+  }
 }
 
-/*******************************************************************************
- *  CLASSIFY THE CURRENT CANVAS
- ******************************************************************************/
 void classifyCanvas() {
-  // 1. Convert the boolean canvas[][] to a float array (28×28)
-  static float inputImage[CANVAS_SIZE * CANVAS_SIZE];
+  // Don't start new classification if one is already processing
+  if (classificationData.processing) {
+    Serial.println("Skipping classification - already processing");
+    return;
+  }
+  
+  Serial.println("Starting new classification");
+  
+  // Convert the boolean canvas[][] to a float array (28×28)
   for (int y = 0; y < CANVAS_SIZE; y++) {
     for (int x = 0; x < CANVAS_SIZE; x++) {
-      // If black => 1.0f, if white => 0.0f (or vice versa, depending on training)
-      inputImage[y * CANVAS_SIZE + x] = (canvas[x][y]) ? 1.0f : 0.0f;
+      // Now true means white, false means black
+      classificationData.image[y * CANVAS_SIZE + x] = (canvas[x][y]) ? 1.0f : 0.0f;
     }
   }
+  
+  // Signal the classification task
+  classificationData.pending = true;
+}
 
-  // 2. Run inference
+// Classification task that runs on core 1
+void classifyTask(void * parameter) {
   float output[10];
-  forwardPass(inputImage, output);
+  
+  while(true) {
+    if (classificationData.pending && !classificationData.processing) {
+      Serial.println("Classification task starting inference");
+      classificationData.processing = true;
+      classificationData.pending = false;
+      
+      // Run inference
+      forwardPass(classificationData.image, output);
+      Serial.println("Forward pass complete");
+      
+      // Find the most likely class
+      float bestVal = output[0];
+      int bestIdx = 0;
+      for (int i = 1; i < 10; i++) {
+        if (output[i] > bestVal) {
+          bestVal = output[i];
+          bestIdx = i;
+        }
+      }
+      
+      Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
+      
+      // Take mutex before accessing TFT
+      if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+        delay(10);
 
-  // 3. Find the most likely class
-  float bestVal = output[0];
-  int bestIdx = 0;
-  for (int i = 1; i < 10; i++) {
-    if (output[i] > bestVal) {
-      bestVal = output[i];
-      bestIdx = i;
+        // Clear a region below the button for text
+        tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
+        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
+        tft.setTextSize(2);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
+        
+        // Print each probability
+        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        for (int i = 0; i < 10; i++) {
+          tft.printf(" %d:%.3f  ", i, output[i]);
+          if (i == 4) {
+            tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
+          }
+        }
+
+        delay(10);
+        
+        // Release the mutex
+        xSemaphoreGive(tftMutex);
+        Serial.println("Updated display");
+      }
+      
+      classificationData.processing = false;
     }
+    // Small delay to prevent tight loop
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-
-  // 4. Print classification result and probabilities
-  //    Clear a region below the button for text:
-  tft.fillRect(0, BTN_Y + BTN_H + 5, WIDTH, 60, TFT_BLACK);
-  tft.setCursor(10, BTN_Y + BTN_H + 10);
-  tft.setTextSize(2);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
-
-  // (Optional) Print each probability
-  // Move cursor down a bit
-  tft.setCursor(10, BTN_Y + BTN_H + 35);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  for (int i = 0; i < 10; i++) {
-    tft.printf(" %d:%.3f  ", i, output[i]);
-    if (i == 4) {
-      tft.printf("\r\n  ");
-    }
-  }
-  Serial.println(); // also print to Serial
 }
 
 /*******************************************************************************
@@ -290,32 +351,35 @@ void touch_calibrate() {
     tft.setTouch(calData);
   } else {
     // Do calibration
-    tft.fillScreen(TFT_BLACK);
-    tft.setCursor(20, 0);
-    tft.setTextFont(2);
-    tft.setTextSize(1);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.println("Touch the corners as indicated");
-    tft.setTextFont(1);
-    tft.println();
+    if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+      tft.fillScreen(TFT_BLACK);
+      tft.setCursor(20, 0);
+      tft.setTextFont(2);
+      tft.setTextSize(1);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.println("Touch the corners as indicated");
+      tft.setTextFont(1);
+      tft.println();
 
-    if (REPEAT_CAL) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
-      tft.println("Set REPEAT_CAL to false to stop this from running again!");
+      if (REPEAT_CAL) {
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.println("Set REPEAT_CAL to false to stop this from running again!");
+      }
+
+      // Calibrate
+      tft.calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15);
+
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.println("Calibration complete!");
+
+      // Save calibration data
+      File f = SPIFFS.open(CALIBRATION_FILE, "w");
+      if (f) {
+        f.write((const unsigned char*)calData, 14);
+        f.close();
+      }
+      tft.setTouch(calData);
+      xSemaphoreGive(tftMutex);
     }
-
-    // Calibrate
-    tft.calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15);
-
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.println("Calibration complete!");
-
-    // Save calibration data
-    File f = SPIFFS.open(CALIBRATION_FILE, "w");
-    if (f) {
-      f.write((const unsigned char*)calData, 14);
-      f.close();
-    }
-    tft.setTouch(calData);
   }
 }
