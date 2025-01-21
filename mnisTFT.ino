@@ -28,6 +28,7 @@ TFT_eSPI tft = TFT_eSPI();
 bool canvas[CANVAS_SIZE][CANVAS_SIZE];
 
 bool wasPressed = false; // Track last touch state
+bool buttonWasPressed = false;
 
 //--------------------------------------------
 // Forward Declarations
@@ -49,6 +50,32 @@ struct ClassificationRequest {
   volatile bool pending;
   volatile bool processing;
 } classificationData;
+
+// Mode button parameters
+#define MODE_BTN_SIZE 30
+#define MODE_BTN_MARGIN 5
+#define MODE_BTN_X (CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) - MODE_BTN_SIZE - MODE_BTN_MARGIN)
+#define MODE_BTN_Y CANVAS_MARGIN + MODE_BTN_MARGIN
+
+bool drawMode = true;  // true = draw (white), false = erase (black)
+
+void drawModeButton() {
+  if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+    // Draw button background
+    tft.fillRect(MODE_BTN_X, MODE_BTN_Y, MODE_BTN_SIZE, MODE_BTN_SIZE, drawMode ? TFT_WHITE : TFT_BLACK);
+    
+    // Draw button border
+    tft.drawRect(MODE_BTN_X, MODE_BTN_Y, MODE_BTN_SIZE, MODE_BTN_SIZE, TFT_WHITE);
+    
+    // Draw letter
+    tft.setTextColor(drawMode ? TFT_BLACK : TFT_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(MODE_BTN_X + 8, MODE_BTN_Y + 8);
+    tft.print(drawMode ? "D" : "E");
+
+    xSemaphoreGive(tftMutex);
+  }
+}
 
 //--------------------------------------------
 // SETUP
@@ -105,6 +132,9 @@ void setup() {
     }
   }
   
+  // Draw initial mode button
+  drawModeButton();
+  
   // Clear classification flags
   classificationData.pending = false;
   classificationData.processing = false;
@@ -137,15 +167,24 @@ void loop() {
     // If we just transitioned from not-pressed -> pressed
     if (!wasPressed) {
       wasPressed = true;  // Touch is now active
+      
+      // Check if mode button was pressed
+      if (t_x >= MODE_BTN_X && t_x < (MODE_BTN_X + MODE_BTN_SIZE) &&
+          t_y >= MODE_BTN_Y && t_y < (MODE_BTN_Y + MODE_BTN_SIZE)) {
+        buttonWasPressed = true;
+        drawMode = !drawMode;  // Toggle mode
+        drawModeButton();      // Update button appearance
+        return;                // Don't process as canvas touch
+      }
     }
     
     // Check if tapped within the 28×28 drawing canvas
     int gridX = (t_x - CANVAS_MARGIN) / BLOCK_SIZE;
     int gridY = (t_y - CANVAS_MARGIN) / BLOCK_SIZE;
-    if (gridX >= 0 && gridX < CANVAS_SIZE &&
+    if (!buttonWasPressed && gridX >= 0 && gridX < CANVAS_SIZE &&
         gridY >= 0 && gridY < CANVAS_SIZE) {
-      // Draw with the 3x3 square brush
-      draw(gridX, gridY, true);
+      // Draw with the 3x3 square brush using current mode
+      draw(gridX, gridY, drawMode);
       
       // Add a small delay to avoid overwhelming the classification task
       delay(10);
@@ -156,6 +195,7 @@ void loop() {
   }
   else {
     wasPressed = false;
+    buttonWasPressed = false;
   }
 }
 
@@ -177,6 +217,10 @@ void drawCanvas() {
         );
       }
     }
+
+    // Draw mode button on top of canvas
+    drawModeButton(); 
+
     xSemaphoreGive(tftMutex);
   }
 }
