@@ -194,8 +194,108 @@ void loop() {
     }
   }
   else {
+    if (wasPressed) {
+      // If we just finished a stroke, ensure we get a final classification
+      if (!buttonWasPressed) {
+        delay(50);  // Wait a bit for any in-progress classification
+        classifyCanvas();  // Trigger final classification
+      }
+    }
     wasPressed = false;
     buttonWasPressed = false;
+  }
+}
+
+bool needsFinalClassification = false;
+
+void classifyCanvas() {
+  // Don't start new classification if one is already processing
+  if (classificationData.processing) {
+    Serial.println("Skipping classification - already processing");
+    needsFinalClassification = true;  // Mark that we need a final classification
+    return;
+  }
+  
+  Serial.println("Starting new classification");
+  needsFinalClassification = false;  // Clear the flag since we're starting a classification
+  
+  // Convert the boolean canvas[][] to a float array (28×28)
+  for (int y = 0; y < CANVAS_SIZE; y++) {
+    for (int x = 0; x < CANVAS_SIZE; x++) {
+      // Now true means white, false means black
+      classificationData.image[y * CANVAS_SIZE + x] = (canvas[x][y]) ? 1.0f : 0.0f;
+    }
+  }
+  
+  // Signal the classification task
+  classificationData.pending = true;
+}
+
+// Classification task that runs on core 1
+void classifyTask(void * parameter) {
+  float output[10];
+  
+  while(true) {
+    if (classificationData.pending && !classificationData.processing) {
+      Serial.println("Classification task starting inference");
+      classificationData.processing = true;
+      classificationData.pending = false;
+      
+      // Run inference
+      forwardPass(classificationData.image, output);
+      Serial.println("Forward pass complete");
+      
+      // Find the most likely class
+      float bestVal = output[0];
+      int bestIdx = 0;
+      for (int i = 1; i < 10; i++) {
+        if (output[i] > bestVal) {
+          bestVal = output[i];
+          bestIdx = i;
+        }
+      }
+      
+      Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
+      
+      // Take mutex before accessing TFT
+      if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+        delay(10);
+
+        // Clear a region below the button for text
+        tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
+        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
+        tft.setTextSize(2);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
+        
+        // Print each probability
+        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        for (int i = 0; i < 10; i++) {
+          tft.printf(" %d:%.3f  ", i, output[i]);
+          if (i == 4) {
+            tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
+          }
+        }
+
+        delay(10);
+        
+        // Release the mutex
+        xSemaphoreGive(tftMutex);
+        Serial.println("Updated display");
+      }
+      
+      classificationData.processing = false;
+      
+      // If we need a final classification, trigger it now
+      if (needsFinalClassification) {
+        Serial.println("Triggering missed final classification");
+        classifyCanvas();
+      }
+    }
+    // Small delay to prevent tight loop
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
@@ -275,89 +375,6 @@ void draw(int cx, int cy, bool color) {
       }
     }
     xSemaphoreGive(tftMutex);
-  }
-}
-
-void classifyCanvas() {
-  // Don't start new classification if one is already processing
-  if (classificationData.processing) {
-    Serial.println("Skipping classification - already processing");
-    return;
-  }
-  
-  Serial.println("Starting new classification");
-  
-  // Convert the boolean canvas[][] to a float array (28×28)
-  for (int y = 0; y < CANVAS_SIZE; y++) {
-    for (int x = 0; x < CANVAS_SIZE; x++) {
-      // Now true means white, false means black
-      classificationData.image[y * CANVAS_SIZE + x] = (canvas[x][y]) ? 1.0f : 0.0f;
-    }
-  }
-  
-  // Signal the classification task
-  classificationData.pending = true;
-}
-
-// Classification task that runs on core 1
-void classifyTask(void * parameter) {
-  float output[10];
-  
-  while(true) {
-    if (classificationData.pending && !classificationData.processing) {
-      Serial.println("Classification task starting inference");
-      classificationData.processing = true;
-      classificationData.pending = false;
-      
-      // Run inference
-      forwardPass(classificationData.image, output);
-      Serial.println("Forward pass complete");
-      
-      // Find the most likely class
-      float bestVal = output[0];
-      int bestIdx = 0;
-      for (int i = 1; i < 10; i++) {
-        if (output[i] > bestVal) {
-          bestVal = output[i];
-          bestIdx = i;
-        }
-      }
-      
-      Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
-      
-      // Take mutex before accessing TFT
-      if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
-        delay(10);
-
-        // Clear a region below the button for text
-        tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
-        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
-        tft.setTextSize(2);
-        tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
-        
-        // Print each probability
-        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
-        tft.setTextSize(1);
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        for (int i = 0; i < 10; i++) {
-          tft.printf(" %d:%.3f  ", i, output[i]);
-          if (i == 4) {
-            tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
-          }
-        }
-
-        delay(10);
-        
-        // Release the mutex
-        xSemaphoreGive(tftMutex);
-        Serial.println("Updated display");
-      }
-      
-      classificationData.processing = false;
-    }
-    // Small delay to prevent tight loop
-    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
