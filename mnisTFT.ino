@@ -86,44 +86,43 @@ void setup() {
     delay(10);
   }
 
+  Serial.println("serial started");
+
   // Create mutex for TFT access before initializing TFT
   tftMutex = xSemaphoreCreateMutex();
   
-  if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
-    tft.init();
-    tft.setRotation(2);
+  Serial.println("mutex taken");
+  tft.init();
+  tft.setRotation(0);
 
 #ifdef TFT_BL
-    pinMode(TFT_BL, OUTPUT);
-    digitalWrite(TFT_BL, HIGH);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
 #endif
 
-    // Touch calibration
-    touch_calibrate();
+  // Touch calibration
+  touch_calibrate();
 
-    // Clear screen to black
-    tft.fillScreen(TFT_BLACK);
+  // Clear screen to black
+  tft.fillScreen(TFT_BLACK);
 
-    // Draw a frame around the canvas
-    tft.drawRect(
-      CANVAS_MARGIN - 1, 
-      CANVAS_MARGIN - 1, 
-      (CANVAS_SIZE * BLOCK_SIZE) + 2, 
-      (CANVAS_SIZE * BLOCK_SIZE) + 2, 
-      TFT_WHITE
-    );
+  // Draw a frame around the canvas
+  tft.drawRect(
+    CANVAS_MARGIN - 1, 
+    CANVAS_MARGIN - 1, 
+    (CANVAS_SIZE * BLOCK_SIZE) + 2, 
+    (CANVAS_SIZE * BLOCK_SIZE) + 2, 
+    TFT_WHITE
+  );
 
-    // Fill canvas area with black
-    tft.fillRect(
-      CANVAS_MARGIN,
-      CANVAS_MARGIN,
-      CANVAS_SIZE * BLOCK_SIZE,
-      CANVAS_SIZE * BLOCK_SIZE,
-      TFT_BLACK
-    );
-    
-    xSemaphoreGive(tftMutex);
-  }
+  // Fill canvas area with black
+  tft.fillRect(
+    CANVAS_MARGIN,
+    CANVAS_MARGIN,
+    CANVAS_SIZE * BLOCK_SIZE,
+    CANVAS_SIZE * BLOCK_SIZE,
+    TFT_BLACK
+  );
 
   // Initialize the canvas to all black (true = white, false = black)
   for (int y = 0; y < CANVAS_SIZE; y++) {
@@ -388,6 +387,8 @@ void touch_calibrate() {
   uint16_t calData[5];
   uint8_t calDataOK = 0;
 
+  Serial.println("Calibrating touch...");
+
   // Check that SPIFFS is working
   if (!SPIFFS.begin()) {
     Serial.println("Formatting SPIFFS...");
@@ -414,6 +415,7 @@ void touch_calibrate() {
   if (calDataOK && !REPEAT_CAL) {
     tft.setTouch(calData);
   } else {
+    Serial.println("Calibrating touch... 2");
     // Do calibration
     if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
       tft.fillScreen(TFT_BLACK);

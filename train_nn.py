@@ -71,8 +71,9 @@ class SmallNet(nn.Module):
 # ---------------------
 transform = transforms.Compose([
     transforms.ToTensor(),
-    RandomBinarizeTransform(min_threshold=0.1, max_threshold=0.4),
-    transforms.RandomRotation(15)
+    RandomBinarizeTransform(min_threshold=0.1, max_threshold=0.3),
+    transforms.RandomRotation(15),
+    transforms.RandomResizedCrop(28, scale=(0.95, 1.05))
 ])
 
 train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
@@ -85,7 +86,7 @@ test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 # Train & Evaluate
 # ---------------------
 model = SmallNet()
-optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Train
 model.train()
