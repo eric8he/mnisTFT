@@ -236,11 +236,11 @@ void classifyCanvas() {
   // Serial.println("Starting new classification");
   // needsFinalClassification = false;
   
-  // for (int y = 0; y < CANVAS_SIZE; y++) {
-  //   for (int x = 0; x < CANVAS_SIZE; x++) {
-  //     classificationData.image[y * CANVAS_SIZE + x] = canvas[x][y] ? 1.0f : 0.0f;
-  //   }
-  // }
+  for (int y = 0; y < CANVAS_SIZE; y++) {
+    for (int x = 0; x < CANVAS_SIZE; x++) {
+      classificationData.image[y * CANVAS_SIZE + x] = canvas[x][y] ? 1.0f : 0.0f;
+    }
+  }
   
   // // Signal the classification task
   // classificationData.pending = true;

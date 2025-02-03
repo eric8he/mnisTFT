@@ -14,17 +14,15 @@
 //----------------------
 // ESP-NOW Packet Setup
 //----------------------
-#define PAYLOAD_SIZE 196      // Each packet carries 196 bytes.
-#define NUM_PACKETS 4         // Total packets to send the 28x28 = 784 bytes.
+#define PAYLOAD_SIZE 196      // Each packet carries 196 bytes (196*4=784 bytes total)
+#define NUM_PACKETS 4         // Total packets needed to send a 28x28 (784-byte) canvas
 
-// Global buffer to reassemble the canvas (784 bytes)
+// Global buffer for reassembled canvas (784 bytes)
 uint8_t receivedCanvas[CANVAS_SIZE * CANVAS_SIZE];
-
-// Array to mark which packet has been received
+// Array to track which packet has been received
 bool packetReceived[NUM_PACKETS] = { false, false, false, false };
 volatile uint8_t packetsCount = 0;
-
-// Flag to signal that all packets have been received
+// Flag to signal that the complete canvas has been reassembled
 volatile bool updateDisplayFlag = false;
 
 // Define the ESP-NOW packet structure (packed to avoid padding)
@@ -43,13 +41,11 @@ TFT_eSPI tft = TFT_eSPI();
 // Function: Draw the Reassembled Canvas
 //----------------------
 void drawReceivedCanvas() {
-  // Clear screen and draw canvas border
-  tft.fillScreen(TFT_BLACK);
+  //tft.fillScreen(TFT_BLACK);
   tft.drawRect(CANVAS_MARGIN - 1, CANVAS_MARGIN - 1,
                (CANVAS_SIZE * BLOCK_SIZE) + 2,
                (CANVAS_SIZE * BLOCK_SIZE) + 2, TFT_WHITE);
   
-  // Draw each pixel from the receivedCanvas buffer
   for (int y = 0; y < CANVAS_SIZE; y++) {
     for (int x = 0; x < CANVAS_SIZE; x++) {
       // Each pixel is represented as 1 (white) or 0 (black)
@@ -64,7 +60,7 @@ void drawReceivedCanvas() {
 }
 
 //----------------------
-// ESP-NOW Receive Callback
+// ESP-NOW Receive Callback with Debug Messages
 //----------------------
 void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
   char macStr[18];
@@ -77,13 +73,28 @@ void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
   
   // Verify the packet length is as expected
   if (len != sizeof(espnow_packet_t)) {
-    Serial.println("Received packet with unexpected length");
+    Serial.print("Unexpected packet length: ");
+    Serial.println(len);
     return;
   }
   
-  // Copy the incoming data into a local packet structure
+  // Copy incoming data into a local packet structure
   espnow_packet_t packet;
   memcpy(&packet, data, sizeof(packet));
+  
+  // Debug: Print packet header information
+  Serial.print("Packet ID: ");
+  Serial.println(packet.packetId);
+  Serial.print("Total Packets: ");
+  Serial.println(packet.totalPackets);
+  
+  // Debug: Dump the entire payload contents (or just a portion)
+  Serial.print("Payload: ");
+  for (int i = 0; i < PAYLOAD_SIZE; i++) {
+    Serial.print(packet.payload[i], DEC);
+    Serial.print(" ");
+  }
+  Serial.println();
   
   // Copy the received payload into the correct position in receivedCanvas
   if (packet.packetId < NUM_PACKETS) {
@@ -94,9 +105,14 @@ void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
     }
   }
   
-  // When all packets have been received, signal the main loop to update the display.
+  // When all packets have been received, print a summary and set flag for display update
   if (packetsCount == NUM_PACKETS) {
-    Serial.println("All canvas packets received; scheduling display update");
+    Serial.println("All canvas packets received; reassembled canvas (first 16 bytes):");
+    for (int i = 0; i < 16; i++) {
+      Serial.print(receivedCanvas[i], DEC);
+      Serial.print(" ");
+    }
+    Serial.println();
     updateDisplayFlag = true;
   }
 }
@@ -106,8 +122,6 @@ void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int l
 //----------------------
 void setup() {
   Serial.begin(115200);
-  
-  // Initialize TFT display
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
@@ -121,7 +135,7 @@ void setup() {
     return;
   }
   
-  // Register the ESP-NOW receive callback
+  // Register the receive callback with the updated signature
   esp_now_register_recv_cb(onDataRecv);
   
   Serial.println("ESP-NOW Receiver is running and waiting for canvas data...");
@@ -131,15 +145,15 @@ void setup() {
 // Main Loop
 //----------------------
 void loop() {
-  // Check if the display update flag has been set by the callback
+  // Check if the complete canvas has been received
   if (updateDisplayFlag) {
     drawReceivedCanvas();
-    // Reset the packet flags for the next transmission
+    // Reset packet tracking for next transmission
     for (int i = 0; i < NUM_PACKETS; i++) {
       packetReceived[i] = false;
     }
     packetsCount = 0;
     updateDisplayFlag = false;
   }
-  delay(100); // Small delay to avoid a tight loop
+  //delay(10);
 }
