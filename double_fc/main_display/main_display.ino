@@ -1,16 +1,17 @@
 #include "FS.h"        // For SPIFFS
 #include <SPI.h>
 #include <TFT_eSPI.h>  // Bodmer's TFT library
+#include <WiFi.h>
+#include <esp_now.h>   // ESP-NOW library
 
-#include "nn.h"        // forwardPass(...) declaration
-#include "weights.h"   // conv1_weight, fc1_bias, etc.
+//#include "nn.h"        // forwardPass(...) declaration
+//#include "weights.h"   // conv1_weight, fc1_bias, etc.
 
 //--------------------------------------------
 // TFT and Touch Setup
 //--------------------------------------------
 TFT_eSPI tft = TFT_eSPI();
 
-// File name used to store the calibration data in SPIFFS
 #define CALIBRATION_FILE "/TouchCalData1"
 #define REPEAT_CAL false
 
@@ -55,25 +56,56 @@ struct ClassificationRequest {
 #define MODE_BTN_SIZE 30
 #define MODE_BTN_MARGIN 5
 #define MODE_BTN_X (CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) - MODE_BTN_SIZE - MODE_BTN_MARGIN)
-#define MODE_BTN_Y CANVAS_MARGIN + MODE_BTN_MARGIN
+#define MODE_BTN_Y (CANVAS_MARGIN + MODE_BTN_MARGIN)
 
 bool drawMode = true;  // true = draw (white), false = erase (black)
 
 void drawModeButton() {
   if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
-    // Draw button background
     tft.fillRect(MODE_BTN_X, MODE_BTN_Y, MODE_BTN_SIZE, MODE_BTN_SIZE, drawMode ? TFT_WHITE : TFT_BLACK);
-    
-    // Draw button border
     tft.drawRect(MODE_BTN_X, MODE_BTN_Y, MODE_BTN_SIZE, MODE_BTN_SIZE, TFT_WHITE);
-    
-    // Draw letter
     tft.setTextColor(drawMode ? TFT_BLACK : TFT_WHITE);
     tft.setTextSize(2);
     tft.setCursor(MODE_BTN_X + 8, MODE_BTN_Y + 8);
     tft.print(drawMode ? "D" : "E");
-
     xSemaphoreGive(tftMutex);
+  }
+}
+
+//--------------------------------------------
+// ESP-NOW definitions for sending canvas data
+//--------------------------------------------
+#define PAYLOAD_SIZE 196   // 196 * 4 = 784 bytes total
+
+typedef struct {
+  uint8_t packetId;
+  uint8_t totalPackets;
+  uint8_t payload[PAYLOAD_SIZE];
+} espnow_packet_t;
+
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// Function to send the canvas over ESP-NOW
+void sendCanvasOverESPNOW() {
+  // Create a temporary buffer of 784 bytes.
+  uint8_t data[CANVAS_SIZE * CANVAS_SIZE];
+  for (int i = 0; i < CANVAS_SIZE * CANVAS_SIZE; i++) {
+    // classificationData.image contains 1.0 (white) or 0.0 (black)
+    data[i] = (classificationData.image[i] >= 0.5f) ? 1 : 0;
+  }
+  const uint8_t totalPackets = (CANVAS_SIZE * CANVAS_SIZE) / PAYLOAD_SIZE; // Should be 4
+  for (uint8_t packetId = 0; packetId < totalPackets; packetId++) {
+    espnow_packet_t packet;
+    packet.packetId = packetId;
+    packet.totalPackets = totalPackets;
+    memcpy(packet.payload, data + (packetId * PAYLOAD_SIZE), PAYLOAD_SIZE);
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t*)&packet, sizeof(packet));
+    if (result == ESP_OK) {
+      Serial.printf("Packet %d sent successfully\n", packetId);
+    } else {
+      Serial.printf("Error sending packet %d: %d\n", packetId, result);
+    }
+    delay(10); // brief delay between packets
   }
 }
 
@@ -82,16 +114,12 @@ void drawModeButton() {
 //--------------------------------------------
 void setup() {
   Serial.begin(115200);
-  while(!Serial) {
-    delay(10);
-  }
-
-  Serial.println("serial started");
-
+  while(!Serial) { delay(10); }
+  Serial.println("Serial started");
+  
   // Create mutex for TFT access before initializing TFT
   tftMutex = xSemaphoreCreateMutex();
   
-  Serial.println("mutex taken");
   tft.init();
   tft.setRotation(0);
 
@@ -107,47 +135,49 @@ void setup() {
   tft.fillScreen(TFT_BLACK);
 
   // Draw a frame around the canvas
-  tft.drawRect(
-    CANVAS_MARGIN - 1, 
-    CANVAS_MARGIN - 1, 
-    (CANVAS_SIZE * BLOCK_SIZE) + 2, 
-    (CANVAS_SIZE * BLOCK_SIZE) + 2, 
-    TFT_WHITE
-  );
+  tft.drawRect(CANVAS_MARGIN - 1, CANVAS_MARGIN - 1,
+               (CANVAS_SIZE * BLOCK_SIZE) + 2, (CANVAS_SIZE * BLOCK_SIZE) + 2, TFT_WHITE);
 
   // Fill canvas area with black
-  tft.fillRect(
-    CANVAS_MARGIN,
-    CANVAS_MARGIN,
-    CANVAS_SIZE * BLOCK_SIZE,
-    CANVAS_SIZE * BLOCK_SIZE,
-    TFT_BLACK
-  );
+  tft.fillRect(CANVAS_MARGIN, CANVAS_MARGIN,
+               CANVAS_SIZE * BLOCK_SIZE, CANVAS_SIZE * BLOCK_SIZE, TFT_BLACK);
 
-  // Initialize the canvas to all black (true = white, false = black)
+  // Initialize the canvas array to all black
   for (int y = 0; y < CANVAS_SIZE; y++) {
     for (int x = 0; x < CANVAS_SIZE; x++) {
-      canvas[x][y] = false; // Black
+      canvas[x][y] = false;
     }
   }
   
-  // Draw initial mode button
   drawModeButton();
   
-  // Clear classification flags
   classificationData.pending = false;
   classificationData.processing = false;
   
   // Create classification task on core 1
-  xTaskCreatePinnedToCore(
-    classifyTask,        // Function to implement the task
-    "classifyTask",      // Name of the task
-    8192,               // Stack size in words
-    NULL,               // Task input parameter
-    1,                  // Priority of the task
-    &classifyTaskHandle, // Task handle
-    1                   // Core where the task should run
-  );
+  // xTaskCreatePinnedToCore(
+  //   classifyTask,        // classification task function (already in your code)
+  //   "classifyTask",      
+  //   8192,               
+  //   NULL,               
+  //   1,                  
+  //   &classifyTaskHandle,
+  //   1                   
+  // );
+  
+  // --- Initialize ESP-NOW ---
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+  }
+  // Add broadcast peer
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add broadcast peer");
+  }
 }
 
 //--------------------------------------------
@@ -163,45 +193,31 @@ void loop() {
   }
 
   if (pressed) {
-    // If we just transitioned from not-pressed -> pressed
     if (!wasPressed) {
-      wasPressed = true;  // Touch is now active
-      
-      // Check if mode button was pressed
+      wasPressed = true;
+      // Check for mode button press
       if (t_x >= MODE_BTN_X && t_x < (MODE_BTN_X + MODE_BTN_SIZE) &&
           t_y >= MODE_BTN_Y && t_y < (MODE_BTN_Y + MODE_BTN_SIZE)) {
         buttonWasPressed = true;
-        drawMode = !drawMode;  // Toggle mode
-        drawModeButton();      // Update button appearance
-        return;                // Don't process as canvas touch
+        drawMode = !drawMode;
+        drawModeButton();
+        return;
       }
     }
-    
-    // Check if tapped within the 28×28 drawing canvas
     int gridX = (t_x - CANVAS_MARGIN) / BLOCK_SIZE;
     int gridY = (t_y - CANVAS_MARGIN) / BLOCK_SIZE;
     if (!buttonWasPressed && gridX >= 0 && gridX < CANVAS_SIZE &&
         gridY >= 0 && gridY < CANVAS_SIZE) {
-      // Draw with the 3x3 square brush using current mode
       draw(gridX, gridY, drawMode);
       drawModeButton();
-      
-      // Add a small delay to avoid overwhelming the classification task
       delay(10);
-      
-      // Trigger classification after drawing
       classifyCanvas();
     }
   }
   else {
-    if (wasPressed) {
-      // If we just finished a stroke, ensure we get a final classification
-      if (!buttonWasPressed) {
-        while (classificationData.processing) {
-          delay(10);
-        }  // Wait a bit for any in-progress classification
-        classifyCanvas();  // Trigger final classification
-      }
+    if (wasPressed && !buttonWasPressed) {
+      while (classificationData.processing) { delay(10); }
+      classifyCanvas();
     }
     wasPressed = false;
     buttonWasPressed = false;
@@ -211,94 +227,96 @@ void loop() {
 bool needsFinalClassification = false;
 
 void classifyCanvas() {
-  // Don't start new classification if one is already processing
-  if (classificationData.processing) {
-    Serial.println("Skipping classification - already processing");
-    needsFinalClassification = true;  // Mark that we need a final classification
-    return;
-  }
+  // if (classificationData.processing) {
+  //   Serial.println("Skipping classification - already processing");
+  //   needsFinalClassification = true;
+  //   return;
+  // }
   
-  Serial.println("Starting new classification");
-  needsFinalClassification = false;  // Clear the flag since we're starting a classification
+  // Serial.println("Starting new classification");
+  // needsFinalClassification = false;
   
-  // Convert the boolean canvas[][] to a float array (28×28)
-  for (int y = 0; y < CANVAS_SIZE; y++) {
-    for (int x = 0; x < CANVAS_SIZE; x++) {
-      // Now true means white, false means black
-      classificationData.image[y * CANVAS_SIZE + x] = (canvas[x][y]) ? 1.0f : 0.0f;
-    }
-  }
+  // for (int y = 0; y < CANVAS_SIZE; y++) {
+  //   for (int x = 0; x < CANVAS_SIZE; x++) {
+  //     classificationData.image[y * CANVAS_SIZE + x] = canvas[x][y] ? 1.0f : 0.0f;
+  //   }
+  // }
   
-  // Signal the classification task
-  classificationData.pending = true;
+  // // Signal the classification task
+  // classificationData.pending = true;
+  
+  // --- Send the input array over ESP-NOW ---
+  sendCanvasOverESPNOW();
 }
+
+
 
 // Classification task that runs on core 1
 void classifyTask(void * parameter) {
   float output[10];
   
-  while(true) {
-    if (classificationData.pending && !classificationData.processing) {
-      Serial.println("Classification task starting inference");
-      classificationData.processing = true;
-      classificationData.pending = false;
+  // while(true) {
+  //   if (classificationData.pending && !classificationData.processing) {
+  //     Serial.println("Classification task starting inference");
+  //     classificationData.processing = true;
+  //     classificationData.pending = false;
       
-      // Run inference
-      forwardPass(classificationData.image, output);
-      Serial.println("Forward pass complete");
+  //     // Run inference
+  //     forwardPass(classificationData.image, output);
+  //     Serial.println("Forward pass complete");
       
-      // Find the most likely class
-      float bestVal = output[0];
-      int bestIdx = 0;
-      for (int i = 1; i < 10; i++) {
-        if (output[i] > bestVal) {
-          bestVal = output[i];
-          bestIdx = i;
-        }
-      }
+  //     // Find the most likely class
+  //     float bestVal = output[0];
+  //     int bestIdx = 0;
+  //     for (int i = 1; i < 10; i++) {
+  //       if (output[i] > bestVal) {
+  //         bestVal = output[i];
+  //         bestIdx = i;
+  //       }
+  //     }
       
-      Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
+  //     Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
       
-      // Take mutex before accessing TFT
-      if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
-        delay(10);
+  //     // Take mutex before accessing TFT
+  //     if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+  //       delay(10);
 
-        // Clear a region below the button for text
-        tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
-        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
-        tft.setTextSize(2);
-        tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
+  //       // Clear a region below the button for text
+  //       tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
+  //       tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
+  //       tft.setTextSize(2);
+  //       tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  //       tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
         
-        // Print each probability
-        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
-        tft.setTextSize(1);
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        for (int i = 0; i < 10; i++) {
-          tft.printf(" %d:%.3f  ", i, output[i]);
-          if (i == 4) {
-            tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
-          }
-        }
+  //       // Print each probability
+  //       tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
+  //       tft.setTextSize(1);
+  //       tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  //       for (int i = 0; i < 10; i++) {
+  //         tft.printf(" %d:%.3f  ", i, output[i]);
+  //         if (i == 4) {
+  //           tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
+  //         }
+  //       }
 
-        delay(10);
+  //       delay(10);
         
-        // Release the mutex
-        xSemaphoreGive(tftMutex);
-        Serial.println("Updated display");
-      }
+  //       // Release the mutex
+  //       xSemaphoreGive(tftMutex);
+  //       Serial.println("Updated display");
+  //     }
       
-      classificationData.processing = false;
+  //     classificationData.processing = false;
       
-      // If we need a final classification, trigger it now
-      if (needsFinalClassification) {
-        Serial.println("Triggering missed final classification");
-        classifyCanvas();
-      }
-    }
-    // Small delay to prevent tight loop
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
+  //     // If we need a final classification, trigger it now
+  //     if (needsFinalClassification) {
+  //       Serial.println("Triggering missed final classification");
+  //       classifyCanvas();
+  //     }
+  //   }
+  //   // Small delay to prevent tight loop
+  //   vTaskDelay(pdMS_TO_TICKS(10));
+  // }
 }
 
 /*******************************************************************************
@@ -449,3 +467,4 @@ void touch_calibrate() {
     }
   }
 }
+
