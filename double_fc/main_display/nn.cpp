@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <pgmspace.h>
 #include <math.h>     // for expf(), etc.
+#include <stdlib.h>   // for malloc() and free()
 
 // Include the generated header from Python
 #include "weights.h"
@@ -59,11 +60,8 @@
 // and dequantize it to float
 // ----------------------------------------------------------
 static inline float readQuantWeight(const uint16_t* array, int index) {
-    // Read the 16-bit stored weight from PROGMEM
     uint16_t rawU16 = pgm_read_word_near(&array[index]);
-    // Reinterpret as signed int16
     int16_t rawI16 = (int16_t) rawU16;
-    // Convert to float by dividing by the global scale
     float val = ((float) rawI16) / WEIGHT_SCALE;
     return val;
 }
@@ -88,9 +86,7 @@ void conv2d(
   const uint16_t* biasArray    
 ) {
     for (int oc = 0; oc < outC; oc++) {
-        // Dequantize bias
         float b = readQuantWeight(biasArray, oc);
-
         for (int oh = 0; oh < outH; oh++) {
             for (int ow = 0; ow < outW; ow++) {
                 float sum = 0.0f;
@@ -100,13 +96,10 @@ void conv2d(
                             int ih = oh * stride + kh;
                             int iw = ow * stride + kw;
                             float val = inData[ic * inH * inW + ih * inW + iw];
-
-                            // Weight index
                             int widx = oc*(inC*kernel_size*kernel_size)
                                        + ic*(kernel_size*kernel_size)
                                        + kh*(kernel_size)
                                        + kw;
-                            
                             float w = readQuantWeight(weightArray, widx);
                             sum += val * w;
                         }
@@ -177,7 +170,10 @@ void linear(
 void forwardPass(const float* input, float* output)
 {
     // 1) conv1 => 8×26×26
-    static float conv1_out[CONV1_OUT_CHANNELS * CONV1_OUT_HEIGHT * CONV1_OUT_WIDTH];
+    float* conv1_out = (float*)malloc(sizeof(float) * CONV1_OUT_CHANNELS * CONV1_OUT_HEIGHT * CONV1_OUT_WIDTH);
+    if (conv1_out == NULL) {
+        return; // allocation error
+    }
     conv2d(
       input, conv1_out,
       CONV1_IN_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH,
@@ -185,13 +181,17 @@ void forwardPass(const float* input, float* output)
       CONV1_KERNEL_SIZE, CONV1_STRIDE,
       conv1_weight, conv1_bias
     );
-    // relu
-    for(int i = 0; i < (CONV1_OUT_CHANNELS * CONV1_OUT_HEIGHT * CONV1_OUT_WIDTH); i++){
+    // Apply ReLU on conv1 output
+    for (int i = 0; i < (CONV1_OUT_CHANNELS * CONV1_OUT_HEIGHT * CONV1_OUT_WIDTH); i++){
         conv1_out[i] = relu(conv1_out[i]);
     }
 
     // 2) conv2 => 16×24×24
-    static float conv2_out[CONV2_OUT_CHANNELS * CONV2_OUT_HEIGHT * CONV2_OUT_WIDTH];
+    float* conv2_out = (float*)malloc(sizeof(float) * CONV2_OUT_CHANNELS * CONV2_OUT_HEIGHT * CONV2_OUT_WIDTH);
+    if (conv2_out == NULL) {
+        free(conv1_out);
+        return;
+    }
     conv2d(
       conv1_out, conv2_out,
       CONV2_IN_CHANNELS, CONV1_OUT_HEIGHT, CONV1_OUT_WIDTH,
@@ -199,13 +199,19 @@ void forwardPass(const float* input, float* output)
       CONV2_KERNEL_SIZE, CONV2_STRIDE,
       conv2_weight, conv2_bias
     );
-    // relu
-    for(int i = 0; i < (CONV2_OUT_CHANNELS * CONV2_OUT_HEIGHT * CONV2_OUT_WIDTH); i++){
+    free(conv1_out);  // No longer needed after conv2 computation
+
+    // Apply ReLU on conv2 output
+    for (int i = 0; i < (CONV2_OUT_CHANNELS * CONV2_OUT_HEIGHT * CONV2_OUT_WIDTH); i++){
         conv2_out[i] = relu(conv2_out[i]);
     }
 
     // 3) max_pool2d => 16×12×12
-    static float pool_out[CONV2_OUT_CHANNELS * POOL_OUT_H * POOL_OUT_W];
+    float* pool_out = (float*)malloc(sizeof(float) * CONV2_OUT_CHANNELS * POOL_OUT_H * POOL_OUT_W);
+    if (pool_out == NULL) {
+        free(conv2_out);
+        return;
+    }
     maxPool2d(
       conv2_out, pool_out,
       CONV2_OUT_CHANNELS,
@@ -213,45 +219,62 @@ void forwardPass(const float* input, float* output)
       POOL_SIZE,
       POOL_OUT_H, POOL_OUT_W
     );
+    free(conv2_out);  // Not needed beyond pooling
 
-    // 4) flatten => size: 16*12*12 = 2304
-    static float flat[FC1_IN_FEATURES];
-    for(int i = 0; i < FC1_IN_FEATURES; i++){
+    // 4) Flatten => size: 16*12*12
+    float* flat = (float*)malloc(sizeof(float) * FC1_IN_FEATURES);
+    if (flat == NULL) {
+        free(pool_out);
+        return;
+    }
+    for (int i = 0; i < FC1_IN_FEATURES; i++){
         flat[i] = pool_out[i];
     }
+    free(pool_out);  // Flattened data now in "flat"
 
     // 5) fc1 => 64
-    static float fc1_out[FC1_OUT_FEATURES];
+    float* fc1_out = (float*)malloc(sizeof(float) * FC1_OUT_FEATURES);
+    if (fc1_out == NULL) {
+        free(flat);
+        return;
+    }
     linear(
       flat, fc1_out,
       FC1_IN_FEATURES, FC1_OUT_FEATURES,
       fc1_weight, fc1_bias
     );
-    // relu
-    for(int i = 0; i < FC1_OUT_FEATURES; i++){
+    free(flat);  // No longer needed after fc1
+    // Apply ReLU on fc1 output
+    for (int i = 0; i < FC1_OUT_FEATURES; i++){
         fc1_out[i] = relu(fc1_out[i]);
     }
 
     // 6) fc2 => 10
-    static float fc2_out[FC2_OUT_FEATURES];
+    float* fc2_out = (float*)malloc(sizeof(float) * FC2_OUT_FEATURES);
+    if (fc2_out == NULL) {
+        free(fc1_out);
+        return;
+    }
     linear(
       fc1_out, fc2_out,
       FC1_OUT_FEATURES, FC2_OUT_FEATURES,
       fc2_weight, fc2_bias
     );
+    free(fc1_out);  // No longer needed after fc2
 
     // 7) softmax
     float maxVal = fc2_out[0];
-    for(int i = 1; i < FC2_OUT_FEATURES; i++){
-        if(fc2_out[i] > maxVal) {
+    for (int i = 1; i < FC2_OUT_FEATURES; i++) {
+        if (fc2_out[i] > maxVal) {
             maxVal = fc2_out[i];
         }
     }
     float sumExp = 0.0f;
-    for(int i = 0; i < FC2_OUT_FEATURES; i++){
+    for (int i = 0; i < FC2_OUT_FEATURES; i++) {
         sumExp += expf(fc2_out[i] - maxVal);
     }
-    for(int i = 0; i < FC2_OUT_FEATURES; i++){
+    for (int i = 0; i < FC2_OUT_FEATURES; i++) {
         output[i] = expf(fc2_out[i] - maxVal) / sumExp;
     }
+    free(fc2_out);  // All done!
 }

@@ -4,8 +4,8 @@
 #include <WiFi.h>
 #include <esp_now.h>   // ESP-NOW library
 
-//#include "nn.h"        // forwardPass(...) declaration
-//#include "weights.h"   // conv1_weight, fc1_bias, etc.
+#include "nn.h"        // forwardPass(...) declaration
+#include "weights.h"   // conv1_weight, fc1_bias, etc.
 
 //--------------------------------------------
 // TFT and Touch Setup
@@ -155,15 +155,15 @@ void setup() {
   classificationData.processing = false;
   
   // Create classification task on core 1
-  // xTaskCreatePinnedToCore(
-  //   classifyTask,        // classification task function (already in your code)
-  //   "classifyTask",      
-  //   8192,               
-  //   NULL,               
-  //   1,                  
-  //   &classifyTaskHandle,
-  //   1                   
-  // );
+  xTaskCreatePinnedToCore(
+    classifyTask,        // classification task function (already in your code)
+    "classifyTask",      
+    8192,               
+    NULL,               
+    1,                  
+    &classifyTaskHandle,
+    1                   
+  );
   
   // --- Initialize ESP-NOW ---
   WiFi.mode(WIFI_STA);
@@ -227,14 +227,14 @@ void loop() {
 bool needsFinalClassification = false;
 
 void classifyCanvas() {
-  // if (classificationData.processing) {
-  //   Serial.println("Skipping classification - already processing");
-  //   needsFinalClassification = true;
-  //   return;
-  // }
+  if (classificationData.processing) {
+    Serial.println("Skipping classification - already processing");
+    needsFinalClassification = true;
+    return;
+  }
   
-  // Serial.println("Starting new classification");
-  // needsFinalClassification = false;
+  Serial.println("Starting new classification");
+  needsFinalClassification = false;
   
   for (int y = 0; y < CANVAS_SIZE; y++) {
     for (int x = 0; x < CANVAS_SIZE; x++) {
@@ -243,7 +243,7 @@ void classifyCanvas() {
   }
   
   // // Signal the classification task
-  // classificationData.pending = true;
+  classificationData.pending = true;
   
   // --- Send the input array over ESP-NOW ---
   sendCanvasOverESPNOW();
@@ -255,68 +255,68 @@ void classifyCanvas() {
 void classifyTask(void * parameter) {
   float output[10];
   
-  // while(true) {
-  //   if (classificationData.pending && !classificationData.processing) {
-  //     Serial.println("Classification task starting inference");
-  //     classificationData.processing = true;
-  //     classificationData.pending = false;
+  while(true) {
+    if (classificationData.pending && !classificationData.processing) {
+      Serial.println("Classification task starting inference");
+      classificationData.processing = true;
+      classificationData.pending = false;
       
-  //     // Run inference
-  //     forwardPass(classificationData.image, output);
-  //     Serial.println("Forward pass complete");
+      // Run inference
+      forwardPass(classificationData.image, output);
+      Serial.println("Forward pass complete");
       
-  //     // Find the most likely class
-  //     float bestVal = output[0];
-  //     int bestIdx = 0;
-  //     for (int i = 1; i < 10; i++) {
-  //       if (output[i] > bestVal) {
-  //         bestVal = output[i];
-  //         bestIdx = i;
-  //       }
-  //     }
+      // Find the most likely class
+      float bestVal = output[0];
+      int bestIdx = 0;
+      for (int i = 1; i < 10; i++) {
+        if (output[i] > bestVal) {
+          bestVal = output[i];
+          bestIdx = i;
+        }
+      }
       
-  //     Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
+      Serial.printf("Best prediction: %d (%.3f)\n", bestIdx, bestVal);
       
-  //     // Take mutex before accessing TFT
-  //     if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
-  //       delay(10);
+      // Take mutex before accessing TFT
+      if (xSemaphoreTake(tftMutex, portMAX_DELAY)) {
+        delay(10);
 
-  //       // Clear a region below the button for text
-  //       tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
-  //       tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
-  //       tft.setTextSize(2);
-  //       tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  //       tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
+        // Clear a region below the button for text
+        tft.fillRect(0, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 5, WIDTH, 60, TFT_BLACK);
+        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 10);
+        tft.setTextSize(2);
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.printf("Pred: %d (Prob=%.3f)\r\n", bestIdx, bestVal);
         
-  //       // Print each probability
-  //       tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
-  //       tft.setTextSize(1);
-  //       tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  //       for (int i = 0; i < 10; i++) {
-  //         tft.printf(" %d:%.3f  ", i, output[i]);
-  //         if (i == 4) {
-  //           tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
-  //         }
-  //       }
+        // Print each probability
+        tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 35);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        for (int i = 0; i < 10; i++) {
+          tft.printf(" %d:%.3f  ", i, output[i]);
+          if (i == 4) {
+            tft.setCursor(10, CANVAS_MARGIN + (CANVAS_SIZE * BLOCK_SIZE) + 45);
+          }
+        }
 
-  //       delay(10);
+        delay(10);
         
-  //       // Release the mutex
-  //       xSemaphoreGive(tftMutex);
-  //       Serial.println("Updated display");
-  //     }
+        // Release the mutex
+        xSemaphoreGive(tftMutex);
+        Serial.println("Updated display");
+      }
       
-  //     classificationData.processing = false;
+      classificationData.processing = false;
       
-  //     // If we need a final classification, trigger it now
-  //     if (needsFinalClassification) {
-  //       Serial.println("Triggering missed final classification");
-  //       classifyCanvas();
-  //     }
-  //   }
-  //   // Small delay to prevent tight loop
-  //   vTaskDelay(pdMS_TO_TICKS(10));
-  // }
+      // If we need a final classification, trigger it now
+      if (needsFinalClassification) {
+        Serial.println("Triggering missed final classification");
+        classifyCanvas();
+      }
+    }
+    // Small delay to prevent tight loop
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 /*******************************************************************************

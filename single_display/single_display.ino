@@ -10,7 +10,7 @@
 //--------------------------------------------
 TFT_eSPI tft = TFT_eSPI();
 
-// File name used to store the calibration data in SPIFFS
+// File name used to store the calibration d0ata in SPIFFS
 #define CALIBRATION_FILE "/TouchCalData1"
 #define REPEAT_CAL false
 
