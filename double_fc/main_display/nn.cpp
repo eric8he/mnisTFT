@@ -166,6 +166,7 @@ void linear(
 
 // ----------------------------------------------------------
 // forwardPass: single 28×28 input -> 10-class output
+// malloc all vars because of esp32 dram fragmentation issue
 // ----------------------------------------------------------
 void forwardPass(const float* input, float* output)
 {
