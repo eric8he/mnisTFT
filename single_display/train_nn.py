@@ -6,9 +6,6 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 import numpy as np
 
-# ---------------------
-# Example Binarize Transform
-# ---------------------
 class BinarizeTransform(object):
     """
     A custom transform that thresholds the input (already converted to tensor)
@@ -20,10 +17,6 @@ class BinarizeTransform(object):
     def __call__(self, img_tensor):
         # img_tensor is assumed to be in [0,1], shape [1, 28, 28]
         return (img_tensor > self.threshold).float()
-
-# ---------------------
-# Random Binarize Transform
-# ---------------------
 class RandomBinarizeTransform(object):
     """
     A custom transform that thresholds the input at a random value within
@@ -37,10 +30,6 @@ class RandomBinarizeTransform(object):
         # Randomly choose threshold for this call
         threshold = self.min_threshold + torch.rand(1).item() * (self.max_threshold - self.min_threshold)
         return (img_tensor > threshold).float()
-
-# ---------------------
-# Model (Same as Before)
-# ---------------------
 class SmallNet(nn.Module):
     def __init__(self):
         super(SmallNet, self).__init__()
